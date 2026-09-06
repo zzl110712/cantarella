@@ -51,12 +51,14 @@ const EXT_TO_INPUT_FORMAT: Record<string, InputFormat> = {
  * format 指定输出格式；undefined = 尽量保持原格式
  * maxWidth 最大宽度 px；只缩小不放大
  * dry true = 真实编码计算大小，但不写任何文件
+ * backupDir 备份目录名（默认 .backup，可被 --backup-dir 覆盖）
  */
 export interface CompressParams {
   quality: number;
   format?: OutputFormat;
   maxWidth?: number;
   dry: boolean;
+  backupDir: string;
 }
 
 /**
@@ -217,7 +219,7 @@ export async function compressOne(
     }
 
     // 备份文件，保证文件不会丢失，如果后缀名不一样不需要备份
-    if (keepFormat) await backupFile(root, file)
+    if (keepFormat) await backupFile(root, file, params.backupDir)
     const tmp = `${output}${randomUUID()}.tmp`
     try {
       // 写入临时文件

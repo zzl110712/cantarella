@@ -5,9 +5,11 @@ import chalk from "chalk";
 import pLimit from "p-limit";
 import path from "node:path";
 import {
+  backupDirState,
   collectImages,
   formatBytes,
   formatPercent,
+  markBackupDir,
   resolveRoot,
 } from "#lib/utils/fs";
 import { accent } from "#lib/utils/theme";
@@ -26,6 +28,8 @@ export interface CompressOptions extends OptionValues {
   dry?: boolean; // 是否预览（不写入文件）
   recursive?: boolean; // 是否递归扫描子目录
   report?: boolean; // 是否生成报告文件
+  yes?: boolean; // 是否跳过问答
+  backupDir?: string; // 备份目录名（CLI --backup-dir，经 parseBackupDir 校验过）
 }
 
 // 交互问答的答案类型（被 CLI 选项跳过的问题不会出现在结果里，全部可选；
@@ -59,8 +63,10 @@ export const compress = async (
 
   let recursive = options.recursive ?? false
   let report = options.report ?? false
+  // 备份目录名：CLI 给了用 CLI 的（parseBackupDir 已保证是单纯目录名），否则走 config 默认
+  const backupDir = options.backupDir ?? config.compress.backupDir
 
-  if (target === undefined) {
+  if (target === undefined && !options.yes) {
     // 进入交互模式
     // getOptionValueSource：commander 记录了每个选项值从哪来，'cli' = 用户亲手输入
     const fromCli = (name: string) => command.getOptionValueSource(name) === 'cli'
@@ -180,7 +186,7 @@ export const compress = async (
       }
       files = [finalTarget]
     } else {
-      files = await collectImages(root, recursive)
+      files = await collectImages(root, recursive, backupDir)
     }
 
     if (files.length === 0) {
@@ -190,7 +196,22 @@ export const compress = async (
       return
     }
 
-    const params: CompressParams = { quality, format, maxWidth, dry }
+    // 备份目录预检：已存在、非空、且没有 cantarella 标记的自定义目录
+    // 视为用户自己的地盘、不共用、一个文件都不动，报错指路。
+    // 撞名的目录一旦被共用，EXCL 会把用户的同名文件误判成"已备份"，原图被覆盖后最初版就永久丢了。
+    // 例外：默认名 .backup 无标记视为旧版本产生的历史备份目录，放行收编——
+    // .backup 是工具的保留命名空间，是历史备份的概率远大于用户故意占用
+    const bdState = await backupDirState(root, backupDir)
+    if (bdState === 'foreign' && backupDir !== config.compress.backupDir) {
+      spinner.error(`备份目录 ${backupDir} 已存在且包含非 cantarella 创建的文件，为避免覆盖或混淆已停止（未改动任何文件）。请换一个 --backup-dir 名字，或先处理该目录`)
+      process.exitCode = 1
+      return
+    }
+    // 首次使用（absent/empty）或收编历史目录时写入标记：之后运行认出标记直接续用、不再打扰——
+    // 否则"再跑一遍压新图"这种正常工作流每次都会撞上预检
+    if (bdState !== 'ours' && !dry) await markBackupDir(root, backupDir)
+
+    const params: CompressParams = { quality, format, maxWidth, dry, backupDir }
     const limit = pLimit(config.compress.defaultConcurrency)
     const batch = new Set(files) // 传给每个任务，用于输出冲突检测
     let processed = 0 // 当前处理文件的下标

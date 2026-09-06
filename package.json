@@ -1,6 +1,6 @@
 {
   "name": "cantarella",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "批量压缩图片的命令行工具",
   "type": "module",
   "bin": {
@@ -49,6 +49,10 @@
     "#lib/*": {
       "development": "./lib/*.ts",
       "default": "./dist/lib/*.js"
+    },
+    "#pkg": {
+      "development": "./package.json",
+      "default": "./package.json"
     }
   },
   "devDependencies": {

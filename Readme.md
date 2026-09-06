@@ -4,7 +4,7 @@
 
 **批量压缩图片的命令行工具**
 
-传入一个文件夹或单张图片，自动压缩覆盖，覆盖前把原图备份到 `.backup/` 目录。
+传入一个文件夹或单张图片，自动压缩覆盖，覆盖前把原图备份到备份目录（默认 `.backup/`，可用 `--backup-dir` 自定义）。
 
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A522.12-brightgreen)](https://nodejs.org/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
@@ -16,8 +16,8 @@
 
 ## ✨ 特性
 
-- **两种使用方式**：不传参数进入交互问答模式；传参数则为纯 CLI 模式，可写进脚本
-- **安全第一**：覆盖原文件前自动备份到 `.backup/`；重压缩不会变小的文件自动跳过
+- **两种使用方式**：不传参数进入交互问答模式；传参数则为纯 CLI 模式，可写进脚本；`-y` 全默认模式让裸命令也能进脚本
+- **安全第一**：覆盖原文件前自动备份（目录名可用 `--backup-dir` 自定义，带撞名防护，绝不共用你已有的文件夹）；重压缩不会变小的文件自动跳过
 - **`--dry` 预览**：真实编码计算压缩后大小，但不写任何文件
 - **`--report` 报告**：在目标目录生成 markdown 压缩报告
 - **格式转换**：jpeg / png / webp / avif / tiff / gif 互转，支持 heic（iPhone 照片）与 svg 输入
@@ -35,7 +35,7 @@ npm install -g cantarella
 ```bash
 git clone https://github.com/zzl110712/cantarella.git
 pnpm install
-pnpm build        # 编译 TS 到 dist/（bin 入口指向编译产物）
+pnpm build        # 编译并压缩 TS 到 dist/（bin 入口指向编译产物）
 npm link          # 注册全局命令 cantarella
 ```
 
@@ -52,20 +52,24 @@ cantarella compress ./photos -f webp      # 全部转成 webp
 cantarella compress ./photos -w 1920      # 限制最大宽度 1920（只缩小不放大）
 cantarella compress ./photos --dry        # 预览：真实计算大小但不写任何文件
 cantarella compress ./photos --report     # 生成 markdown 压缩报告
+cantarella compress -y                    # 跳过全部问答，全默认直接压当前目录（脚本友好）
+cantarella compress ./photos --backup-dir bak   # 备份到自定义目录 bak/ 而不是 .backup/
 ```
 
 交互模式中直接回车即采用默认值；ESC / Ctrl+C 随时取消。
 
 ## ⚙️ 选项
 
-| 选项                     | 说明                                              | 默认值        |
-| ------------------------ | ------------------------------------------------- | ------------- |
-| `-q, --quality <number>` | 压缩质量 1-100（png 映射为压缩等级）              | `80`          |
-| `-f, --format <format>`  | 输出格式：`jpeg` `png` `webp` `avif` `tiff` `gif` | 保持原格式    |
-| `-w, --max-width <px>`   | 等比缩放的最大宽度，只缩小不放大                  | `0`（不缩放） |
-| `-r, --recursive`        | 递归处理子目录                                    | 关闭          |
-| `--dry`                  | 预览模式：真实计算压缩后大小，但不写任何文件      | 关闭          |
-| `--report`               | 在目标目录生成 markdown 压缩报告                  | 关闭          |
+| 选项                     | 说明                                                               | 默认值        |
+| ------------------------ | ------------------------------------------------------------------ | ------------- |
+| `-q, --quality <number>` | 压缩质量 1-100（png 映射为压缩等级）                               | `80`          |
+| `-f, --format <format>`  | 输出格式：`jpeg` `png` `webp` `avif` `tiff` `gif`                  | 保持原格式    |
+| `-w, --max-width <px>`   | 等比缩放的最大宽度，只缩小不放大                                   | `0`（不缩放） |
+| `-r, --recursive`        | 递归处理子目录                                                     | 关闭          |
+| `--dry`                  | 预览模式：真实计算压缩后大小，但不写任何文件                       | 关闭          |
+| `--report`               | 在目标目录生成 markdown 压缩报告                                   | 关闭          |
+| `-y, --yes`              | 跳过全部问答、直接用默认值开压（裸命令可脚本化）                   | 关闭          |
+| `--backup-dir <name>`    | 备份目录名（须为单纯目录名；非空且非本工具创建的目录会被拒绝使用） | `.backup`     |
 
 ## 📋 支持格式
 
@@ -108,6 +112,13 @@ pnpm build          # 编译并压缩到 dist/（发布、npm link 前需要）
 ```
 
 ## 📜 版本记录
+
+### 🚀 1.0.1 · 2026-09-06
+
+- ✨ **新增** `-V, --version`：打印版本号（从包自身的 package.json 动态读取，发版只改一处）
+- ✨ **新增** `-y, --yes` 全默认模式：跳过全部问答、直接用默认值开压，`compress -y` 裸命令也能进脚本；与 `-q` 等选项自由组合（CLI 值优先，其余默认）
+- ✨ **新增** `--backup-dir <name>` 自定义备份目录：目录结构原样重现，扫描时自动忽略；非法名（含路径分隔符、`..`）在参数层被拒绝
+- 🛡️ **新增** 备份目录撞名防护：非空且非 cantarella 创建的自定义目录直接报错拒用（一个文件都不动），杜绝"用户同名文件被误认成已有备份、原图覆盖后最初版丢失"的数据安全问题
 
 ### 🎉 1.0.0 · 2026-09-04
 
