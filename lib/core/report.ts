@@ -8,8 +8,8 @@ export interface RunInfo {
   target: string; // 用户输入的原始路径
   root: string; // 基准目录
   recursive: boolean; // 是否递归
+  concurrency: number; // 并发数（批处理层信息，与 recursive 平级——不是传给每个文件的参数）
   params: CompressParams; // 压缩参数
-  concurrency: number; // 并发数
   startedAt: Date; // 开始时间
 }
 

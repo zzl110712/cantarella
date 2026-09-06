@@ -30,6 +30,7 @@ export interface CompressOptions extends OptionValues {
   report?: boolean; // 是否生成报告文件
   yes?: boolean; // 是否跳过问答
   backupDir?: string; // 备份目录名（CLI --backup-dir，经 parseBackupDir 校验过）
+  concurrency?: number; // 并发数量 默认是 4
 }
 
 // 交互问答的答案类型（被 CLI 选项跳过的问题不会出现在结果里，全部可选；
@@ -41,6 +42,7 @@ interface Answers {
   maxWidth?: string;
   recursive?: boolean;
   report?: boolean;
+  concurrency?: string;
 }
 
 /**
@@ -73,6 +75,21 @@ export const compress = async (
     
     // 条件展开实现跳过某个问题，如果展开的是一个空对象就相当于什么都没发生
     const a: Answers = await p.group({
+      ...(fromCli('concurrency') ? {}: {
+        concurrency: () =>
+          p.text({
+            message: '同时压缩文件数量',
+            placeholder: '4',
+            defaultValue: '4',
+            validate: v => {
+              if (v === undefined || v.trim() === '') return
+              const n = Number(v)
+              if (!Number.isInteger(n) || n < 1 || n > 1024) {
+                return '请输入 1 - 1024 范围内的正整数'
+              }
+            }
+          })
+      }),
       ...(fromCli('quality') ? {} : {
         quality: () => 
           p.text({
@@ -145,6 +162,7 @@ export const compress = async (
       }
     })
 
+    if (a.concurrency !== undefined) options.concurrency = Number(a.concurrency)
     // 把答案写回 options text 的答案此时才转数字——validate 已保证 Number() 能安全转换
     if (a.quality !== undefined) options.quality = Number(a.quality)
     if (a.format !== undefined) options.format = a.format
@@ -154,6 +172,7 @@ export const compress = async (
   }
   // target 已经给出的时候没有交互，选项全部是 CLI 的默认值 - 保证命令可脚本化
   const quality = options.quality ?? 80
+  const concurrency = options.concurrency ?? 4
   const format = options.format === undefined || options.format === '' ?
     undefined : (options.format as OutputFormat)
   const maxWidth = options.maxWidth
@@ -212,7 +231,7 @@ export const compress = async (
     if (bdState !== 'ours' && !dry) await markBackupDir(root, backupDir)
 
     const params: CompressParams = { quality, format, maxWidth, dry, backupDir }
-    const limit = pLimit(config.compress.defaultConcurrency)
+    const limit = pLimit(concurrency)
     const batch = new Set(files) // 传给每个任务，用于输出冲突检测
     let processed = 0 // 当前处理文件的下标
 
@@ -282,8 +301,8 @@ export const compress = async (
         target: finalTarget,
         root,
         recursive,
+        concurrency,
         params,
-        concurrency: config.compress.defaultConcurrency,
         startedAt: new Date()
       }
       const reportFile = await writeReport(root, buildReport(info, results))

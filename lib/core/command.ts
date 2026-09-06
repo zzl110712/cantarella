@@ -30,6 +30,14 @@ function parseBackupDir(value: string): string {
   return name
 }
 
+function parseConcurrency(value: string): number {
+  const n = Number.parseInt(value, 10)
+  if (Number.isNaN(n) || n < 1 || n > 1024) {
+    throw new InvalidArgumentError('必须是 1 - 1024 的整数')
+  }
+  return n
+}
+
 /**
  * 有些选项需要更复杂的配置（限定可选值、环境变量、默认值、互斥……）
  * 这些配置是以链式方法的形式挂在选项上的，简写字符串挂不住。
@@ -61,5 +69,6 @@ export function myCompress(program: Command): void {
     .option('--report', '在目标目录生成 markdown 压缩报告', false)
     .option('-y, --yes', '跳过全部问答、直接用默认值开压', false)
     .option('--backup-dir <name>', '备份目录名（默认 .backup）', parseBackupDir)
+    .option('-c, --concurrency <n>', '同时处理多少张图片', parseConcurrency, 4)
     .action(compress) // action 参数是固定的 => 第四个永远是 options（选项参数），第五个永远是 Command实例，现在只有一个位置参数，在 compress [target] target 就是位置参数，也可以声明多个位置参数
 }

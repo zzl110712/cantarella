@@ -52,6 +52,7 @@ const EXT_TO_INPUT_FORMAT: Record<string, InputFormat> = {
  * maxWidth 最大宽度 px；只缩小不放大
  * dry true = 真实编码计算大小，但不写任何文件
  * backupDir 备份目录名（默认 .backup，可被 --backup-dir 覆盖）
+ * 注意：并发数不在这里——它属于批处理层（compress.ts 的 pLimit 与 RunInfo），不是单文件参数
  */
 export interface CompressParams {
   quality: number;
