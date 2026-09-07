@@ -46,6 +46,7 @@ export function buildReport(info: RunInfo, results: FileResult[]): string {
     `- 参数：quality=${info.params.quality}` +
       ` format=${info.params.format ?? "保持原格式"}` +
       ` maxWidth=${info.params.maxWidth ?? "不缩放"}` +
+      ` 输出=${info.params.outDir ?? "原地覆盖"}` +
       ` 并发=${info.concurrency}` +
       `${info.params.dry ? "（dry 预览，未写入）" : ""}`,
     "",
@@ -65,15 +66,24 @@ export function buildReport(info: RunInfo, results: FileResult[]): string {
   )
 
   lines.push("## 明细", "")
-  lines.push("| 文件 | 输出格式 | 原大小 | 压缩后 | 节省 | 状态 |")
-  lines.push("|---|---|---|---|---|---|")
+  lines.push("| 文件 | 输出格式 | 原大小 | 输出位置 | 压缩后 | 节省 | 状态 |")
+  lines.push("|---|---|---|---|---|---|---|")
 
   for (const r of results) {
     const rel = path.relative(info.root, r.file)
     const after = r.status === 'failed' ? '-' : formatBytes(r.afterBytes)
     const saved = r.status === 'failed' ? '-' : formatPercent(r.beforeBytes, r.afterBytes)
-    const status = r.status === 'failed' ? `failed: ${r.error ?? '未知错误'}` : r.status
-    lines.push(`| ${rel} | ${r.format} | ${formatBytes(r.beforeBytes)} | ${after} | ${saved} | ${status} |`,)
+    // skipped 的含义随模式而变：覆盖模式 = 原图未动；out 模式 = 原样复制进目录树（未压缩）
+    let status: string = r.status
+    if (r.status === 'failed') {
+      status = `failed: ${r.error ?? '未知错误'}`
+    } else if (r.status === 'skipped') {
+      status = info.params.outDir !== undefined ? 'skipped（原样复制，未压缩）' : 'skipped（原图未动）'
+    }
+    // 输出位置：out 模式记它在输出树里的位置，覆盖模式记相对 root 的路径
+    const outBase = info.params.outDir ?? info.root
+    const outRel = r.status === 'failed' ? '-' : path.relative(outBase, r.output)
+    lines.push(`| ${rel} | ${r.format} | ${formatBytes(r.beforeBytes)} | ${outRel} | ${after} | ${saved} | ${status} |`,)
   }
   lines.push("")
 

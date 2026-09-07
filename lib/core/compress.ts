@@ -4,6 +4,7 @@ import * as p from "@clack/prompts";
 import chalk from "chalk";
 import pLimit from "p-limit";
 import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import {
   backupDirState,
   collectImages,
@@ -31,6 +32,7 @@ export interface CompressOptions extends OptionValues {
   yes?: boolean; // 是否跳过问答
   backupDir?: string; // 备份目录名（CLI --backup-dir，经 parseBackupDir 校验过）
   concurrency?: number; // 并发数量 默认是 4
+  out?: string; // 输出目录
 }
 
 // 交互问答的答案类型（被 CLI 选项跳过的问题不会出现在结果里，全部可选；
@@ -177,6 +179,8 @@ export const compress = async (
     undefined : (options.format as OutputFormat)
   const maxWidth = options.maxWidth
   const dry = options.dry ?? false
+  // 尽早变成绝对路径，下游不用再关心相对/绝对
+  const outDir = options.out !== undefined ? path.resolve(options.out) : undefined
 
   // spinner 在问答结束后才启动：问答期间终端整块交给 clack 的问答渲染，
   // 转圈动画和问答界面会互相覆盖对方的行
@@ -192,6 +196,13 @@ export const compress = async (
     } catch {
       spinner.error(`路径不存在或无法访问：${finalTarget}`)
       process.exitCode = 1 // 让脚本调用方能感知失败，但不会立刻终止进程
+      return
+    }
+
+    // 如果用户手滑写了 --out .（或指向 root 本身），会发生“无备份的原地覆盖”——比默认行为更危险。
+    if (outDir !== undefined && outDir === root) {
+      spinner.error('--out 不能指向目标目录本身（那等于无备份覆盖原图）')
+      process.exitCode = 1
       return
     }
 
@@ -215,31 +226,38 @@ export const compress = async (
       return
     }
 
-    // 备份目录预检：已存在、非空、且没有 cantarella 标记的自定义目录
-    // 视为用户自己的地盘、不共用、一个文件都不动，报错指路。
-    // 撞名的目录一旦被共用，EXCL 会把用户的同名文件误判成"已备份"，原图被覆盖后最初版就永久丢了。
-    // 例外：默认名 .backup 无标记视为旧版本产生的历史备份目录，放行收编——
-    // .backup 是工具的保留命名空间，是历史备份的概率远大于用户故意占用
-    const bdState = await backupDirState(root, backupDir)
-    if (bdState === 'foreign' && backupDir !== config.compress.backupDir) {
-      spinner.error(`备份目录 ${backupDir} 已存在且包含非 cantarella 创建的文件，为避免覆盖或混淆已停止（未改动任何文件）。请换一个 --backup-dir 名字，或先处理该目录`)
-      process.exitCode = 1
-      return
+    // 备份的工作需要在用户没有指定输出路径的前提下进行，out 模式的承诺是“源目录一个字节都不动”。
+    if (outDir === undefined) {
+      // 备份目录预检：已存在、非空、且没有 cantarella 标记的自定义目录
+      // 视为用户自己的地盘、不共用、一个文件都不动，报错指路。
+      // 撞名的目录一旦被共用，EXCL 会把用户的同名文件误判成"已备份"，原图被覆盖后最初版就永久丢了。
+      // 例外：默认名 .backup 无标记视为旧版本产生的历史备份目录，放行收编——
+      // .backup 是工具的保留命名空间，是历史备份的概率远大于用户故意占用
+      const bdState = await backupDirState(root, backupDir)
+      if (bdState === 'foreign' && backupDir !== config.compress.backupDir) {
+        spinner.error(`备份目录 ${backupDir} 已存在且包含非 cantarella 创建的文件，为避免覆盖或混淆已停止（未改动任何文件）。请换一个 --backup-dir 名字，或先处理该目录`)
+        process.exitCode = 1
+        return
+      }
+      // 首次使用（absent/empty）或收编历史目录时写入标记：之后运行认出标记直接续用、不再打扰——
+      // 否则"再跑一遍压新图"这种正常工作流每次都会撞上预检
+      if (bdState !== 'ours' && !dry) await markBackupDir(root, backupDir)
     }
-    // 首次使用（absent/empty）或收编历史目录时写入标记：之后运行认出标记直接续用、不再打扰——
-    // 否则"再跑一遍压新图"这种正常工作流每次都会撞上预检
-    if (bdState !== 'ours' && !dry) await markBackupDir(root, backupDir)
 
-    const params: CompressParams = { quality, format, maxWidth, dry, backupDir }
+    const params: CompressParams = { quality, format, maxWidth, dry, backupDir, outDir }
     const limit = pLimit(concurrency)
-    const batch = new Set(files) // 传给每个任务，用于输出冲突检测
+    // 输出路径认领集：预填本批输入路径——覆盖模式下每个输入都会被原地重写，天然占着自己的路径；
+    // 任务真正要写盘前再到 compressOne 里认领自己的 output。一个集合兜住两种撞车：
+    // 1) 输出撞输入：heic -> jpg 撞上同目录已存在的 a.jpg（预填的输入路径负责拦截）
+    // 2) 输出撞输出：--out 模式下 a.heic 和 a.jpg 都要写 out/a.jpg（先到先得的认领负责拦截）
+    const claimed = new Set<string>(files)
     let processed = 0 // 当前处理文件的下标
 
     spinner.message(`${ dry ? '预览' : '压缩' } ${processed}/${files.length}`)
     const results = await Promise.all(
       files.map(f => {
         return limit(async () => {
-          const r = await compressOne(f, params, root, batch)
+          const r = await compressOne(f, params, root, claimed)
           processed += 1
           spinner.message(
             `${ dry ? '预览' : '压缩' } ${processed}/${files.length} ${path.basename(f)}`,
@@ -279,13 +297,19 @@ export const compress = async (
       p.log.message(chalk.bold("预览明细（未写入任何文件）："));
       for (const r of results) {
         const rel = path.relative(root, r.file)
+        // out 模式顺带展示输出落点，dry 阶段就能核对目录树结构
+        // （failed 的 output 可能还没算出来——早期失败时它只是输入路径的初值，不展示）
+        const dest = outDir !== undefined && r.status !== 'failed'
+          ? ` -> ${path.relative(outDir, r.output)}` : ''
         if (r.status === 'failed') {
           p.log.error(`${rel} —— ${r.error}`)
         } else if (r.status === 'skipped') {
-          p.log.warn(`${rel} 会跳过（重压缩不会变小）`)
+          p.log.warn(outDir === undefined
+            ? `${rel} 会跳过（重压缩不会变小）`
+            : `${rel}${dest} 不压缩、原样复制（重压缩不会变小）`)
         } else {
           p.log.success(
-            `${rel} ${formatBytes(r.beforeBytes)} => ${formatBytes(r.afterBytes)}（节省 ${formatPercent(r.beforeBytes, r.afterBytes)}）`
+            `${rel}${dest} ${formatBytes(r.beforeBytes)} => ${formatBytes(r.afterBytes)}（节省 ${formatPercent(r.beforeBytes, r.afterBytes)}）`
           )
         }
       }
@@ -305,7 +329,10 @@ export const compress = async (
         params,
         startedAt: new Date()
       }
-      const reportFile = await writeReport(root, buildReport(info, results))
+      // out 模式的报告也写进输出目录——对源目录的承诺是"一个字节都不动"；
+      // 极端情况（全部文件失败）outDir 可能还没被任何文件创建过，写报告前先兜底建目录
+      if (outDir !== undefined) await mkdir(outDir, { recursive: true })
+      const reportFile = await writeReport(outDir ?? root, buildReport(info, results))
       p.log.info(`报告已生成：${reportFile}`)
       p.outro('完成')
     }

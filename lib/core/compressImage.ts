@@ -1,7 +1,7 @@
 import sharp, { type Sharp } from 'sharp'
 import path from 'path'
 import { randomUUID } from 'crypto'
-import { readFile, rename, unlink, writeFile } from 'fs/promises'
+import { readFile, rename, unlink, writeFile, mkdir } from 'fs/promises'
 import { backupFile, replaceExt } from '#lib/utils/fs'
 
 // 工具支持输出格式（单一数据源：CLI 的 --format 白名单和交互问答的可选值都从这派生）
@@ -52,6 +52,7 @@ const EXT_TO_INPUT_FORMAT: Record<string, InputFormat> = {
  * maxWidth 最大宽度 px；只缩小不放大
  * dry true = 真实编码计算大小，但不写任何文件
  * backupDir 备份目录名（默认 .backup，可被 --backup-dir 覆盖）
+ * outDir 指定输出目录
  * 注意：并发数不在这里——它属于批处理层（compress.ts 的 pLimit 与 RunInfo），不是单文件参数
  */
 export interface CompressParams {
@@ -60,6 +61,7 @@ export interface CompressParams {
   maxWidth?: number;
   dry: boolean;
   backupDir: string;
+  outDir?: string;
 }
 
 /**
@@ -69,7 +71,7 @@ export interface CompressParams {
  * format 实际输出格式
  * beforeBytes 输入的时候文件大小
  * afterBytes 输出的时候文件大小 失败的时候是 0
- * status 
+ * status done=已写入压缩结果；skipped=未压缩（覆盖模式=原图未动，out 模式=原样拷贝进目录树）；failed=失败
  * error failed 的时候的错误信息
  */
 export interface FileResult {
@@ -134,14 +136,14 @@ function applyOutputFormat(p: Sharp, format: OutputFormat, quality: number): Sha
  * @param file 图片路径
  * @param params 压缩参数
  * @param root 基准目录
- * @param batch 本批所有待处理文件的绝对路径集合，用来检测"输出路径撞车"
+ * @param claimed 输出路径认领集（compress.ts 预填了本批输入路径）：写盘前认领自己的 output，已被占用则报错失败
  * @returns 压缩后图片信息
  */
 export async function compressOne(
   file: string,
   params: CompressParams,
   root: string,
-  batch: Set<string>
+  claimed: Set<string>
 ): Promise<FileResult> {
   // 先组装错误信息，Promise.all 是一个异常全部异常的模式，所以整个函数不能异常
   const result: FileResult = {
@@ -177,15 +179,21 @@ export async function compressOne(
           ? inputFormat
           : FALLBACK_OUTPUT[inputFormat]
       )
+    
     // 确定输出文件路径和输出文件路径扩展名
     const keepFormat = outputFormat === inputFormat
-    const output = keepFormat ? file : replaceExt(file, EXT_BY_FORMAT[outputFormat])
+    const rel = path.relative(root, file)
+    // 在"相对 root 的空间"里表达输出结构：svg -> png 的扩展名替换也在这里完成
+    const relOut = keepFormat ? rel : replaceExt(rel, EXT_BY_FORMAT[outputFormat])
+    // out 模式嫁接到新根；否则维持原地覆盖的旧语义（覆盖）
+    const output = params.outDir !== undefined
+      ? path.join(params.outDir, relOut)
+      : keepFormat ? file : replaceExt(file, EXT_BY_FORMAT[outputFormat])
+
     result.output = output
     result.format = outputFormat
-    // 因为 heic 文件输入之后会被转换为 heif ，但是 heif 只能输入，输出会转换为 jpeg，如果待转换列表中本身就有 a.jpeg，那么输出会有冲突
-    if (output !== file && batch.has(output)) {
-      throw new Error(`输出 ${path.basename(output)} 和待处理文件同名，已跳过转换（该文件自身会被处理）`)
-    }
+    // 撞车检测不在这里做：这里只算出路径，"这个路径最终归谁"要等编码与跳过判定之后——
+    // 覆盖模式的 skipped 直接 return（不写盘、不认领），out 模式的 skipped 原样拷贝落盘（要认领）
 
     let pipeline: Sharp = sharp(input)
 
@@ -206,25 +214,46 @@ export async function compressOne(
     // 编码到内存， dry 模式依赖内存文件拿到压缩后真实大小，但是不会将文件写盘
     const { data } = await pipeline.toBuffer({ resolveWithObject: true }) //  resolveWithObject 让 toBuffer() 不只是返回裸 Buffer，而是返回一个对象，里面同时包含图片数据和图片信息, 那么结构还可以拿到另外一个属性 info ，但是这里只用 data 就够了。
     result.afterBytes = data.byteLength
-
+    
     const wouldSkip = keepFormat && data.byteLength >= input.byteLength
-    // 如果用户明确需要更换文件后缀名，那也要正常输出
-    if (wouldSkip) {
+    // 如果用户明确需要更换文件后缀名，那也要正常输出（wouldSkip 只在保持原格式时才可能成立）
+    // 跳过压缩的两种结局：覆盖模式 = 不写任何文件（原图保持原样）；
+    // out 模式 = 把原始字节原样拷进目录树——目录树完整性优先，宁可复制一份也不留缺口
+    if (wouldSkip && params.outDir === undefined) {
       result.status = 'skipped'
       return result
     }
-    // 如果是 dry 模式，不需要写盘直接输出即可
+    // out 模式 skipped 实际落盘的是原样拷贝：afterBytes 如实记回原文件大小（节省 0%）。
+    // 提前设置是安全的：若后续认领/写盘失败，status 保持 failed，所有消费方都按 failed 分支处理
+    if (wouldSkip) result.afterBytes = input.byteLength
+    // 认领输出路径。集合里站着三类占用者：预填的输入路径（覆盖模式下它们会被原地重写）、
+    // 本批其他任务已认领的输出、自己（add 幂等，重复认领无害）。
+    // 位置讲究：必须在 wouldSkip 之后——覆盖模式的 skipped 已在上面 return（不写盘也就不认领），
+    // out 模式的 skipped 以原样拷贝落盘、走到这里认领；不变式：认领 = 真的会占用这个路径；
+    // 必须在 dry 分支之前——预览和真实运行要看到同一套撞车结论。
+    // check + add 之间没有 await，单线程事件循环里是一步原子操作：并发任务不可能同时通过检测
+    if (output !== file && claimed.has(output)) {
+      throw new Error(`输出路径冲突：${path.basename(output)} 已被本批其他文件占用`)
+    }
+    claimed.add(output)
+
+    // 如果是 dry 模式，不需要写盘直接输出即可（状态到终点才定，中途失败不会误标成 skipped/done）
     if (params.dry) {
-      result.status = 'done'
+      result.status = wouldSkip ? 'skipped' : 'done'
       return result
     }
 
-    // 备份文件，保证文件不会丢失，如果后缀名不一样不需要备份
-    if (keepFormat) await backupFile(root, file, params.backupDir)
+    // 备份文件，保证文件不会丢失，如果后缀名不一样不需要备份（out 模式不覆盖原图，无需备份）
+    if (keepFormat && params.outDir === undefined) await backupFile(root, file, params.backupDir)
+    if (params.outDir !== undefined) {
+      // 覆盖模式下输出目录必然存在（就是源文件所在目录）；
+      // out 模式的目标目录树是全新的，recursive 幂等，并发下重复调用无害
+      await mkdir(path.dirname(output), { recursive: true })
+    }
     const tmp = `${output}${randomUUID()}.tmp`
     try {
-      // 写入临时文件
-      await writeFile(tmp, data)
+      // 写入临时文件；out 模式跳过压缩的文件写原始字节（原样拷贝），其余写编码结果
+      await writeFile(tmp, wouldSkip ? input : data)
       // 替换旧文件
       await rename(tmp, output)
     } catch(err) {
@@ -232,7 +261,7 @@ export async function compressOne(
       await unlink(tmp).catch(() => {})
       throw err
     }
-    result.status = 'done'
+    result.status = wouldSkip ? 'skipped' : 'done'
     return result
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err)
