@@ -3,7 +3,7 @@ import type { Command, OptionValues } from "commander";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
 import pLimit from "p-limit";
-import path from "node:path";
+import path, { extname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import {
   backupDirState,
@@ -33,6 +33,7 @@ export interface CompressOptions extends OptionValues {
   backupDir?: string; // 备份目录名（CLI --backup-dir，经 parseBackupDir 校验过）
   concurrency?: number; // 并发数量 默认是 4
   out?: string; // 输出目录
+  smart?: boolean; // 开启 smart 模式（多格式压缩取最小）
 }
 
 // 交互问答的答案类型（被 CLI 选项跳过的问题不会出现在结果里，全部可选；
@@ -59,8 +60,18 @@ export const compress = async (
   options: CompressOptions,
   command: Command,
 ): Promise<void> => {
+  // spinner 在问答结束后才启动：问答期间终端整块交给 clack 的问答渲染，
+  // 转圈动画和问答界面会互相覆盖对方的行
+  const spinner = p.spinner()
   // intro/outro 是 clack 的"画框"：intro 开框、outro 收框，log.* 是框内带符号的行。
   p.intro(accent("Cantarella 图片压缩工具"));
+
+  // -s 与 -f 互斥：同时给出直接报错退出（smart 是逐张挑最小，format 是全部转成，语义冲突）
+  if (options.smart && options.format !== undefined) {
+    spinner.error('smart 模式下不能指定输出文件格式')
+    process.exitCode = 1
+    return
+  }
 
   // 传了 target (相对 / 绝对) 就压 target，没传压当前目录
   const finalTarget = target === undefined ? process.cwd() : path.resolve(target.trim())
@@ -109,7 +120,7 @@ export const compress = async (
             }
           })
       }),
-      ...(fromCli('format') ? {} : {
+      ...(fromCli('format') || options.smart ? {} : { // 条件展开的条件里加一个 smart：smart 模式没有"选格式"这回事
         format: () =>
           p.select({
             message: '输出格式',
@@ -179,12 +190,10 @@ export const compress = async (
     undefined : (options.format as OutputFormat)
   const maxWidth = options.maxWidth
   const dry = options.dry ?? false
+  const smart = options.smart ?? false
   // 尽早变成绝对路径，下游不用再关心相对/绝对
   const outDir = options.out !== undefined ? path.resolve(options.out) : undefined
 
-  // spinner 在问答结束后才启动：问答期间终端整块交给 clack 的问答渲染，
-  // 转圈动画和问答界面会互相覆盖对方的行
-  const spinner = p.spinner()
   try {
     spinner.start('正在扫描文件...')
     let root = ''
@@ -244,7 +253,7 @@ export const compress = async (
       if (bdState !== 'ours' && !dry) await markBackupDir(root, backupDir)
     }
 
-    const params: CompressParams = { quality, format, maxWidth, dry, backupDir, outDir }
+    const params: CompressParams = { quality, format, maxWidth, dry, backupDir, outDir, smart }
     const limit = pLimit(concurrency)
     // 输出路径认领集：预填本批输入路径——覆盖模式下每个输入都会被原地重写，天然占着自己的路径；
     // 任务真正要写盘前再到 compressOne 里认领自己的 output。一个集合兜住两种撞车：
@@ -308,8 +317,11 @@ export const compress = async (
             ? `${rel} 会跳过（重压缩不会变小）`
             : `${rel}${dest} 不压缩、原样复制（重压缩不会变小）`)
         } else {
+          const inExt = path.extname(r.file)
+          const outExt = path.extname(r.output)
+          const fmtChange = inExt !== outExt ? `（${inExt} -> ${outExt}）` : ''
           p.log.success(
-            `${rel}${dest} ${formatBytes(r.beforeBytes)} => ${formatBytes(r.afterBytes)}（节省 ${formatPercent(r.beforeBytes, r.afterBytes)}）`
+            `${rel}${dest} ${formatBytes(r.beforeBytes)} => ${formatBytes(r.afterBytes)}（节省 ${formatPercent(r.beforeBytes, r.afterBytes)}）${fmtChange}`
           )
         }
       }

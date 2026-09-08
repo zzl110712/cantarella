@@ -78,5 +78,6 @@ export function myCompress(program: Command): void {
     .option('--backup-dir <name>', '备份目录名（默认 .backup）', parseBackupDir)
     .option('-c, --concurrency <n>', '同时处理多少张图片', parseConcurrency, 4)
     .option('-o, --out <dir>', '输出到独立目录（镜像源目录结构，不覆盖原图）', parseOutDir)
+    .option('-s, --smart', '每张图分别按多个候选格式编码', false)
     .action(compress) // action 参数是固定的 => 第四个永远是 options（选项参数），第五个永远是 Command实例，现在只有一个位置参数，在 compress [target] target 就是位置参数，也可以声明多个位置参数
 }

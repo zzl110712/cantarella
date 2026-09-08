@@ -62,6 +62,7 @@ export interface CompressParams {
   dry: boolean;
   backupDir: string;
   outDir?: string;
+  smart?: boolean;
 }
 
 /**
@@ -82,6 +83,12 @@ export interface FileResult {
   afterBytes: number;
   status: "done" | "skipped" | "failed";
   error?: string;
+}
+
+// png 是无损格式，png→webp 是"有损换体积"。要不要给 png 加一条无损赛道——把 .webp({ lossless: true }) 也纳入候选，无损 webp 对截图/图形类常常比 png 小 10-25%，对照片类常常反而更大。把它加进候选集，输的那边自然会被淘汰，正好用上"比大小"机制本身。
+interface Candidate {
+  format: OutputFormat; // 编成什么格式（决定扩展名、报告显示）
+  lossless?: boolean; // webp 专有变体：true = 无损模式 => 只有 png 特殊处理
 }
 
 // 【类型守卫】将 string 类型收窄为 输出格式字面量类型
@@ -172,50 +179,78 @@ export async function compressOne(
      * 扩展名虽不“聪明”，但它是用户眼里的事实，行为可预期。元数据只取它真正可靠的两个字段：width 和 hasAlpha。
      */
     const meta = await sharp(input).metadata()
-    // 在 compressImage.ts 142 行代码 => 会将 format 的类型收窄为 undefined
-    const outputFormat: OutputFormat = 
-      params.format ?? (
-        isOutputFormat(inputFormat)
-          ? inputFormat
-          : FALLBACK_OUTPUT[inputFormat]
-      )
+
+    // 组装一个 input 到某种格式编码结果的管道，每个候选各调用一次，sharp 的链式调用是在同一个实例上配置编码器，一个实例只能有一个输出格式，不能交叉使用
+    const buildPipeline = (c: Candidate): Sharp => {
+      let pipeline: Sharp = sharp(input)
+
+      if (params.maxWidth !== undefined && meta.width !== undefined && meta.width > params.maxWidth) {
+        pipeline = pipeline.resize({
+          width: params.maxWidth,
+          withoutEnlargement: true // 只缩小不放大
+        })
+      }
+
+      // flatten 只装给 jpeg 候选，webp 支持透明
+      // jpeg 不支持透明通道，带 alpha 的图片，例如透明 png 转 jpeg 前先铺白底
+      if (c.format === 'jpeg' && meta.hasAlpha) {
+        pipeline.flatten({ background: '#ffffff' })
+      }
+
+      if (c.lossless) return pipeline.webp({ lossless: true }) // 变体直连编码器
+      return applyOutputFormat(pipeline, c.format, params.quality)
+    }
+
+    // 基准格式：可输出的用原格式；svg/heif 只能输入，用 FALLBACK 兜底
+    const base = isOutputFormat(inputFormat) ? inputFormat : FALLBACK_OUTPUT[inputFormat]
+    // smart 的候选集是“格式”不是路径，非 smart 就是长度为 1 的候选集 -- 单格式是特例，两种模式走一套代码
+    const candidates: Candidate[] = params.smart
+      ? [
+          { format: base },
+          { format: 'webp' },
+          ...(base === 'png' ? [{ format: 'webp' as const, lossless: true }] : []),  // png 专属赛道
+        ]
+      : [{ format: params.format ?? base }]
+
+    let winner: { format: OutputFormat, data: Buffer } | undefined
+    for (const c of candidates) {
+      const { data } = await buildPipeline(c).toBuffer({ resolveWithObject: true }) //  resolveWithObject 让 toBuffer() 不只是返回裸 Buffer，而是返回一个对象，里面同时包含图片数据和图片信息, 那么结构还可以拿到另外一个属性 info ，但是这里只用 data 就够了。
+      if (winner === undefined || data.byteLength < winner.data.byteLength) {
+        winner = { format: c.format, data }
+      }
+    }
+    // candidates 至少有一个值，winner 必然有值，这个 throw 是给系统类型看的
+    if (winner === undefined) throw new Error('没有可用的输出候选')
     
-    // 确定输出文件路径和输出文件路径扩展名
+    const outputFormat = winner.format
     const keepFormat = outputFormat === inputFormat
+    // smart 模式换格式是工具选择而非用户选择：所有候选没有赢过原文件就跳，不看 keepFormat，不是 smart 模式，用户指定换格式，变大也要换
+    // （必须算在路径计算之前：跳过状态下"输出"就是输入自己，落点扩展名依赖这个判定）
+    const wouldSkip = (params.smart || keepFormat) && winner.data.byteLength >= input.byteLength
+
     const rel = path.relative(root, file)
-    // 在"相对 root 的空间"里表达输出结构：svg -> png 的扩展名替换也在这里完成
-    const relOut = keepFormat ? rel : replaceExt(rel, EXT_BY_FORMAT[outputFormat])
+    // 在"相对 root 的空间"里表达输出结构：svg -> png 的扩展名替换也在这里完成。
+    // 跳过 = 原样字节：落点必须保持原扩展名——按胜者格式命名的 relOut 在拷贝场景下
+    // 会让文件名和内容对不上（覆盖模式虽不写盘，报告"输出位置"也该显示没动过的原名）
+    const relOut = wouldSkip || keepFormat ? rel : replaceExt(rel, EXT_BY_FORMAT[outputFormat])
     // out 模式嫁接到新根；否则维持原地覆盖的旧语义（覆盖）
     const output = params.outDir !== undefined
       ? path.join(params.outDir, relOut)
-      : keepFormat ? file : replaceExt(file, EXT_BY_FORMAT[outputFormat])
+      : wouldSkip || keepFormat ? file : replaceExt(file, EXT_BY_FORMAT[outputFormat])
 
     result.output = output
     result.format = outputFormat
+
     // 撞车检测不在这里做：这里只算出路径，"这个路径最终归谁"要等编码与跳过判定之后——
     // 覆盖模式的 skipped 直接 return（不写盘、不认领），out 模式的 skipped 原样拷贝落盘（要认领）
+    result.afterBytes = winner.data.byteLength
 
-    let pipeline: Sharp = sharp(input)
-
-    if (params.maxWidth !== undefined && meta.width !== undefined && meta.width > params.maxWidth) {
-      pipeline = pipeline.resize({
-        width: params.maxWidth,
-        withoutEnlargement: true // 只缩小不放大
-      })
+    // out 模式 skipped 实际落盘的是原样拷贝：afterBytes 如实记回原文件大小（节省 0%）、format 回退到输入侧基准。
+    // 提前设置是安全的：若后续认领/写盘失败，status 保持 failed，所有消费方都按 failed 分支处理
+    if (wouldSkip) {
+      result.afterBytes = input.byteLength
+      result.format = base
     }
-
-    // jpeg 不支持透明通道，带 alpha 的图片，例如透明 png 转 jpeg 前先铺白底
-    if (outputFormat === 'jpeg' && meta.hasAlpha) {
-      pipeline.flatten({ background: '#ffffff' })
-    }
-
-    pipeline = applyOutputFormat(pipeline, outputFormat, params.quality)
-
-    // 编码到内存， dry 模式依赖内存文件拿到压缩后真实大小，但是不会将文件写盘
-    const { data } = await pipeline.toBuffer({ resolveWithObject: true }) //  resolveWithObject 让 toBuffer() 不只是返回裸 Buffer，而是返回一个对象，里面同时包含图片数据和图片信息, 那么结构还可以拿到另外一个属性 info ，但是这里只用 data 就够了。
-    result.afterBytes = data.byteLength
-    
-    const wouldSkip = keepFormat && data.byteLength >= input.byteLength
     // 如果用户明确需要更换文件后缀名，那也要正常输出（wouldSkip 只在保持原格式时才可能成立）
     // 跳过压缩的两种结局：覆盖模式 = 不写任何文件（原图保持原样）；
     // out 模式 = 把原始字节原样拷进目录树——目录树完整性优先，宁可复制一份也不留缺口
@@ -223,9 +258,6 @@ export async function compressOne(
       result.status = 'skipped'
       return result
     }
-    // out 模式 skipped 实际落盘的是原样拷贝：afterBytes 如实记回原文件大小（节省 0%）。
-    // 提前设置是安全的：若后续认领/写盘失败，status 保持 failed，所有消费方都按 failed 分支处理
-    if (wouldSkip) result.afterBytes = input.byteLength
     // 认领输出路径。集合里站着三类占用者：预填的输入路径（覆盖模式下它们会被原地重写）、
     // 本批其他任务已认领的输出、自己（add 幂等，重复认领无害）。
     // 位置讲究：必须在 wouldSkip 之后——覆盖模式的 skipped 已在上面 return（不写盘也就不认领），
@@ -253,7 +285,7 @@ export async function compressOne(
     const tmp = `${output}${randomUUID()}.tmp`
     try {
       // 写入临时文件；out 模式跳过压缩的文件写原始字节（原样拷贝），其余写编码结果
-      await writeFile(tmp, wouldSkip ? input : data)
+      await writeFile(tmp, wouldSkip ? input : winner.data)
       // 替换旧文件
       await rename(tmp, output)
     } catch(err) {
