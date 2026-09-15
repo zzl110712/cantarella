@@ -18,6 +18,7 @@ import { compressOne, OUTPUT_FORMATS, type CompressParams, type OutputFormat } f
 import { buildReport, writeReport, type RunInfo } from "./report.ts";
 import config from "#config";
 
+
 // 收窄 OptionValues 宽松类型，声明这个命令真正会用到的字段类型
 // （format 在 commander 眼里是 string，合法值已由 choices 校验，用时再断言成 OutputFormat）
 // 空串来自交互问答"保持原格式"选项的 value，不在 OutputFormat 联合里——
@@ -68,7 +69,7 @@ export const compress = async (
 
   // -s 与 -f 互斥：同时给出直接报错退出（smart 是逐张挑最小，format 是全部转成，语义冲突）
   if (options.smart && options.format !== undefined) {
-    spinner.error('smart 模式下不能指定输出文件格式')
+    p.log.error('smart 模式下不能指定输出文件格式')
     process.exitCode = 1
     return
   }

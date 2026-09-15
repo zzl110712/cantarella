@@ -13,7 +13,7 @@ const INPUT_ONLY_FORMATS = ['heif', 'svg'] as const
 export type InputFormat = OutputFormat | (typeof INPUT_ONLY_FORMATS)[number]
 
 // 【输出格式】写文件用的扩展名
-const EXT_BY_FORMAT: Record<OutputFormat, string> = {
+export const EXT_BY_FORMAT: Record<OutputFormat, string> = {
   jpeg: '.jpg',
   png: '.png',
   webp: '.webp',
@@ -23,7 +23,7 @@ const EXT_BY_FORMAT: Record<OutputFormat, string> = {
 }
 
 // 只能解码的格式必须转出，设置默认转换目标
-const FALLBACK_OUTPUT: Record<
+export const FALLBACK_OUTPUT: Record<
   (typeof INPUT_ONLY_FORMATS)[number],
   OutputFormat
 > = {
@@ -32,7 +32,7 @@ const FALLBACK_OUTPUT: Record<
 }
 
 // 扩展名和输入格式映射
-const EXT_TO_INPUT_FORMAT: Record<string, InputFormat> = {
+export const EXT_TO_INPUT_FORMAT: Record<string, InputFormat> = {
   ".jpg": "jpeg",
   ".jpeg": "jpeg",
   ".png": "png",
@@ -92,8 +92,17 @@ interface Candidate {
 }
 
 // 【类型守卫】将 string 类型收窄为 输出格式字面量类型
-function isOutputFormat(f: string): f is OutputFormat {
+export function isOutputFormat(f: string): f is OutputFormat {
   return (OUTPUT_FORMATS as readonly string[]).includes(f)
+}
+
+/**
+ * 输入格式 -> 输出基准：能保持原格式的保持，只能输入的（heif/svg）走兜底表转出
+ * @param input 输入格式
+ * @returns 输出格式
+ */
+export function baseOutputFormat(input: InputFormat): OutputFormat {
+  return isOutputFormat(input) ? input : FALLBACK_OUTPUT[input]
 }
 
 /**
@@ -121,7 +130,7 @@ function pngOptions(quality: number): {
  * @param quality 压缩质量
  * @returns 管道对象
  */
-function applyOutputFormat(p: Sharp, format: OutputFormat, quality: number): Sharp {
+export function applyOutputFormat(p: Sharp, format: OutputFormat, quality: number): Sharp {
   switch (format) {
     case 'jpeg':
       return p.jpeg({ quality, mozjpeg: true }) // mozjpeg: true 换用 Mozilla 的 JPEG 编码器（更优的霍夫曼表 + trellis 量化），同质量再小 5-10%，代价是编码稍慢
@@ -182,7 +191,7 @@ export async function compressOne(
 
     // 组装一个 input 到某种格式编码结果的管道，每个候选各调用一次，sharp 的链式调用是在同一个实例上配置编码器，一个实例只能有一个输出格式，不能交叉使用
     const buildPipeline = (c: Candidate): Sharp => {
-      let pipeline: Sharp = sharp(input)
+      let pipeline: Sharp = sharp(input).rotate()
 
       if (params.maxWidth !== undefined && meta.width !== undefined && meta.width > params.maxWidth) {
         pipeline = pipeline.resize({
@@ -202,7 +211,7 @@ export async function compressOne(
     }
 
     // 基准格式：可输出的用原格式；svg/heif 只能输入，用 FALLBACK 兜底
-    const base = isOutputFormat(inputFormat) ? inputFormat : FALLBACK_OUTPUT[inputFormat]
+    const base = baseOutputFormat(inputFormat)
     // smart 的候选集是“格式”不是路径，非 smart 就是长度为 1 的候选集 -- 单格式是特例，两种模式走一套代码
     const candidates: Candidate[] = params.smart
       ? [
