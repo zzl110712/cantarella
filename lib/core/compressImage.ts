@@ -91,6 +91,23 @@ interface Candidate {
   lossless?: boolean; // webp 专有变体：true = 无损模式 => 只有 png 特殊处理
 }
 
+// png 压缩档位表：把 quality 踩在深位台阶上（表必须按 minQuality 降序排，find 才能命中最近档）
+interface PngGear {
+  minQuality: number; // 命中条件：quality >= minQuality
+  colours: number; // 调色板颜色上限：>16=8bpp，<=16=4bpp，<=4=2bpp，<=2=1bpp
+  dither: number; // 抖动强度：视觉上防色带，字节上是 deflate 压不动的噪声
+}
+
+const PNG_GEARS: PngGear[] = [
+  { minQuality: 80, colours: 256, dither: 1 }, // 近无损量化；开 palette 本身就是第一级台阶（photo 1340->280）
+  { minQuality: 70, colours: 256, dither: 0.5 }, // 只降抖动：8bpp 内照片不动，平滑图形 -15%
+  { minQuality: 60, colours: 16, dither: 1 }, // 4bpp 台阶：照片第一次断崖（-68%）；16 色必须全抖动防色带
+  { minQuality: 50, colours: 16, dither: 0.5 }, // 档内微调：平滑图形 -17%
+  { minQuality: 40, colours: 16, dither: 0 }, // 关抖动：平滑图形 -94%（索引流重新变得可压）
+  { minQuality: 10, colours: 4, dither: 0 }, // 2bpp 台阶：照片再腰斩
+  { minQuality: 1, colours: 2, dither: 0 } // 1bpp 极限：黑白二值
+]
+
 // 【类型守卫】将 string 类型收窄为 输出格式字面量类型
 export function isOutputFormat(f: string): f is OutputFormat {
   return (OUTPUT_FORMATS as readonly string[]).includes(f)
@@ -106,20 +123,26 @@ export function baseOutputFormat(input: InputFormat): OutputFormat {
 }
 
 /**
- * png 是无损格式，没有 jpeg 那种"有损 quality"：
- *  把 quality 反向映射成 0-9 压缩等级（quality 越低，压得越狠、编码越慢）
- *  quality <= 60 时追加 palette（量化到最多 256 色），这是 png 唯一有效的"有损"手段
- * @param quality 压缩等级
- * @returns 压缩结果
+ * png 是无损格式，没有 jpeg 那种平滑的"有损 quality"：
+ * 体积的硬台阶是位深（24bpp -> 8bpp -> 4bpp -> 2bpp -> 1bpp），档位表就是把 quality 踩在台阶上
+ * compressionLevel 恒定 9：zlib 无损、压多狠都不损画质，没有理由不顶格
+ * （旧公式"quality 越低 cl 越高"是语义倒置：q100 会算出 cl0 = 完全不压缩）
+ * 为什么不用 sharp 的 quality：它传给 libimagequant 的"感知质量目标"实测在 60-100 区间躺平，砍掉
+ * @param quality 压缩质量 1-100
+ * @returns png 编码参数
  */
 function pngOptions(quality: number): {
   compressionLevel: number;
   palette?: boolean;
+  colours?: number;
+  dither?: number;
+  adaptiveFiltering?: boolean;
 } {
-  const compressionLevel = Math.round(((100 - quality) / 100) * 9)
-  return quality <= 60
-    ? { compressionLevel, palette: true }
-    : { compressionLevel }
+  if (quality > 80) return { compressionLevel: 9, adaptiveFiltering: true }
+  const gear = PNG_GEARS.find(g => quality >= g.minQuality)
+  // quality 恒 >= 1，find 必命中；这个分支是给类型系统看的
+  if (gear === undefined) return { compressionLevel: 9 }
+  return { compressionLevel: 9, palette: true, colours: gear.colours, dither: gear.dither }
 }
 
 /**

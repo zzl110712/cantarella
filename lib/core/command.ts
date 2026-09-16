@@ -91,7 +91,7 @@ export function myCompress(program: Command): void {
     .description('批量压缩图片（覆盖原文件前自动备份到备份目录，默认 .backup/）')
     .option(
       '-q, --quality <number>',
-      '压缩质量 1-100，默认 80（png 映射为压缩等级）',
+      '压缩质量 1-100，默认 80（png 映射为调色板颜色数）',
       parseQuality,
       80
     )
